@@ -2,6 +2,8 @@
 
 A native macOS menu bar app for the ecobee thermostats in your **Apple Home**. It uses Apple's HomeKit framework, so the thermostats stay in Apple Home, Siri, and Home automations on your iPhone and keep working there. It doesn't use the ecobee cloud or an API key, and nothing needs to be re-paired or reset.
 
+<img width="406" height="667" alt="image" src="https://github.com/user-attachments/assets/52488115-dc51-4afd-8b5f-c7aef94b0ef0" />
+
 ## Features
 
 - Menu bar item shows the room temperature, plus a flame or snowflake icon while the system is heating or cooling.
