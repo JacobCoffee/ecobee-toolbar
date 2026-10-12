@@ -9,10 +9,10 @@ enum Theme {
     static let cardStroke = Color.white.opacity(0.07)
     static let secondary = Color.white.opacity(0.55)
 
-    static func tint(for field: ThermostatMap.Field, mode: HVACMode?) -> Color {
+    static func tint(for field: SetpointField, mode: HVACMode?) -> Color {
         switch (field, mode) {
-        case (.heatThreshold, _), (.targetTemperature, .heat): heat
-        case (.coolThreshold, _), (.targetTemperature, .cool): cool
+        case (.heat, _), (.target, .heat): heat
+        case (.cool, _), (.target, .cool): cool
         default: idle
         }
     }

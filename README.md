@@ -1,8 +1,6 @@
 # EcobeeBar
 
-A native macOS menu bar app for controlling an ecobee thermostat **locally over HomeKit (HAP)**. It doesn't use the ecobee cloud, an API key, Python, or Home Assistant.
-
-The HomeKit Accessory Protocol client is written in Swift on CryptoKit and Network.framework: SRP-6a pair setup, Ed25519/X25519 pair verify, ChaCha20-Poly1305 session framing, Bonjour discovery, and event subscriptions. Pairing files are compatible with [ecobee-local](https://github.com/addition-official/ecobee-local) and aiohomekit in both directions.
+A native macOS menu bar app for the ecobee thermostats in your **Apple Home**. It uses Apple's HomeKit framework, so the thermostats stay in Apple Home, Siri, and Home automations on your iPhone and keep working there. It doesn't use the ecobee cloud or an API key, and nothing needs to be re-paired or reset.
 
 ## Features
 
@@ -10,66 +8,75 @@ The HomeKit Accessory Protocol client is written in Swift on CryptoKit and Netwo
 - Popover controls:
   - Setpoint slider and −/+ buttons (whole °F or half °C steps).
   - Separate heat and cool thresholds in Auto mode.
-  - Mode (Off/Heat/Cool/Auto), fan (Auto/On), and a power toggle that restores the last mode.
-  - Comfort profile (Home/Sleep/Away/Hold) and an Away toggle, on models that expose them. The ecobee3 lite doesn't.
-  - Humidity, and remote SmartSensor temperature and occupancy.
-- Push updates over HAP events, with a 60 s poll as a safety net. Reconnects with backoff and after the Mac wakes.
-- Multiple thermostats, switched from the name in the popover header.
+  - Mode (Off/Heat/Cool/Auto), fan (Auto/Always On), and a power toggle that restores the last mode.
+  - Comfort profile and an Away toggle, on ecobee models whose firmware reports them correctly. The ecobee3 lite doesn't, so they're hidden there.
+  - Humidity, and the temperature and occupancy of remote room sensors.
+- Live updates through HomeKit notifications.
+- Every thermostat in every home you can access, switched from the name in the popover header.
+
+## How it works
+
+A Mac app can't use HomeKit unless it's a Mac Catalyst (UIKit) app, and Catalyst can't host an AppKit menu bar popover in the same process: SwiftUI resolves to its UIKit variant there. So EcobeeBar is two processes:
+
+```mermaid
+flowchart LR
+    A["EcobeeBar.app<br/>AppKit + SwiftUI<br/>status item & popover"] <-- "JSON lines over<br/>~/Library/Application Support/EcobeeBar/homekit.sock" --> B["EcobeeBar HomeKit.app<br/>(Contents/Helpers)<br/>headless Mac Catalyst<br/>HMHomeManager"]
+    B <--> C[homed / Apple Home]
+```
+
+- The menu bar app launches the helper, reconnects to it if it goes away, and stops it on quit.
+- The helper exits on its own 10 s after the menu bar app disconnects.
+- Only the helper carries the HomeKit entitlement.
 
 ## Requirements
 
-- macOS 14 or later. Builds with the Command Line Tools; Xcode isn't required.
-- An ecobee that **is not paired to Apple Home**. A HomeKit accessory belongs to a single home, and only that home can add other controllers. If the thermostat is in Apple Home, reset it first: **Menu → Settings → HomeKit → Reset**. This removes it from Apple Home.
+- macOS 14 or later, signed in to iCloud with Home enabled. Your thermostats must already show up in the Home app.
+- Xcode, signed in to an Apple ID, for provisioning only. The build itself works with just the Command Line Tools.
+- **A signing identity and provisioning profile with the HomeKit capability.** `homed` rejects any process that lacks the `com.apple.developer.homekit` entitlement, and that entitlement only works with a provisioning profile. `scripts/provision.sh` gets both from Xcode.
 
 ## Build & run
 
 ```sh
-scripts/bundle.sh          # → build/EcobeeBar.app (release, ad-hoc signed)
+scripts/provision.sh       # once (and again when the profile expires)
+scripts/bundle.sh          # picks up build/signing.env from provision.sh
 open build/EcobeeBar.app
 ```
 
-On first launch macOS asks for Local Network access. Allow it, otherwise discovery and connections fail.
+Without a profile, `scripts/bundle.sh` still builds, but the app only explains that HomeKit signing is required.
 
-## Pairing
+On first launch macOS asks whether EcobeeBar can access your Home data. Click **Allow**.
 
-Click the menu bar item, pick your thermostat, and enter the 8-digit code from **Menu → Settings → HomeKit** on the thermostat. There are two other ways to add one:
+## Signing
 
-- **Import → From ecobee-local** picks up files that `ecobee-pair` wrote to `~/ecobee-local/`.
-- **Enter address manually** (`host:port`) works when mDNS doesn't cross your network, for example on separate VLANs.
+One-time setup:
 
-Credentials are stored in `~/Library/Application Support/EcobeeBar/pairings/` (mode 0600), in aiohomekit's JSON format. They contain long-term keys that grant full control of the thermostat, so treat them like passwords. **Remove…** in the settings menu sends a HAP RemovePairing request so the thermostat can be paired somewhere else.
+1. Install Xcode, then make it the active developer directory: `sudo xcode-select -s /Applications/Xcode.app`.
+2. In Xcode → Settings → Accounts, add your Apple ID.
+3. Run `scripts/provision.sh` to list the paid teams Xcode knows about, then `TEAM_ID=… scripts/provision.sh` with yours. The script never picks a team on its own, because the account may also belong to an organization's team.
 
-## hapctl
+The script builds a throwaway Mac Catalyst app (`dev/provisioning/`) with automatic signing and `-allowProvisioningUpdates`. That makes Xcode create the Apple Development certificate, an explicit App ID with HomeKit, and a Mac Catalyst development profile that includes this Mac. It saves the profile to `build/HomeKit.provisionprofile` and the identity to `build/signing.env`.
 
-A CLI that uses the same libraries, for scripting and debugging:
+**This needs a paid Apple Developer Program team.** A free Personal Team fails with "Entitlement com.apple.developer.homekit not found and could not be included in profile". Apple offers HomeKit to free accounts for iOS apps only, not Mac Catalyst. Paid profiles last a year; when one expires, rerun `scripts/provision.sh && scripts/bundle.sh`.
 
-```sh
-swift run hapctl scan                       # HomeKit accessories on the LAN
-swift run hapctl pair "Main Floor" 12345678
-swift run hapctl status
-swift run hapctl set-temp 21.5              # °C; also set-heat / set-cool
-swift run hapctl set-mode cool              # off | heat | cool | auto
-swift run hapctl watch                      # stream push updates
-swift run hapctl dump                       # every service/characteristic
-swift run hapctl unpair
-```
+The helper's bundle ID defaults to `com.jacobcoffee.EcobeeBar.HomeKit`; override it with `HELPER_ID=…`. Bundle IDs are global, so a different team needs its own.
 
-`--dir PATH` points it at a different pairing folder.
+To sign by hand instead, set `SIGN_IDENTITY="Apple Development: …"` and `HOMEKIT_PROFILE=path/to/profile` for `scripts/bundle.sh`.
 
 ## Development
 
 ```sh
-scripts/test.sh                             # unit tests (SRP, TLV8, framing, HTTP parsing)
+scripts/test.sh                                   # unit tests (socket framing, setpoint clamping)
 uv run --with HAP-python dev/fake_thermostat.py   # simulated ecobee, setup code 123-45-678
 ```
 
-The fake thermostat exposes the same characteristics as a real ecobee: fan state, ecobee's vendor comfort-profile UUIDs, and a remote sensor. It also drifts the room temperature so you can see HVAC activity and events. When it runs on the same Mac, mDNSResponder may not resolve its hostname, so pair with its address: `hapctl pair <your-ip>:51826 12345678`.
+To test without touching your real thermostats, add the fake one to Apple Home (Home app → Add Accessory → More options). It has a fan, ecobee's comfort-profile characteristics, and a remote sensor, and it drifts the room temperature so you can watch HVAC activity.
+
+An earlier version talked to the thermostat directly over the HomeKit Accessory Protocol, which required removing it from Apple Home. It's preserved in the first git commit.
 
 ## Layout
 
 ```
-Sources/HAPKit     HAP client: TLV8, SRP, pairing, encrypted session, HTTP, discovery, pairing store
-Sources/EcobeeKit  thermostat mapping (by HomeKit type), typed state, reconnecting client
+Sources/EcobeeKit  shared model + socket protocol (built into both processes)
 Sources/EcobeeBar  menu bar app (AppKit status item + SwiftUI popover)
-Sources/hapctl     CLI
+Helper/            Mac Catalyst HomeKit helper (built by scripts/bundle.sh)
 ```

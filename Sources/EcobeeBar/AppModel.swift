@@ -1,7 +1,6 @@
 import AppKit
 import EcobeeKit
 import Foundation
-import HAPKit
 import Observation
 import ServiceManagement
 
@@ -19,21 +18,17 @@ enum UnitPreference: String, CaseIterable, Identifiable {
 
 @MainActor @Observable
 final class AppModel {
-    let store = PairingStore()
-    private(set) var pairings: [Pairing] = []
-    private(set) var state: ThermostatState?
-    private(set) var status: ThermostatClient.Status = .connecting
+    let bridge = HomeKitBridge()
     /// Transient command error shown in the footer.
     private(set) var commandError: String?
-    /// Setpoint being edited (°C), shown instead of the device value until committed.
+    /// Setpoint being edited (°C), shown instead of the device value until it lands.
     private(set) var draftC: Double?
     var editsCoolThreshold = false
-    var showingPairing = false
 
     var selectedID: String? {
         didSet {
-            UserDefaults.standard.set(selectedID, forKey: "selectedPairing")
-            if oldValue != selectedID { connect() }
+            UserDefaults.standard.set(selectedID, forKey: "selectedThermostat")
+            if oldValue != selectedID { draftC = nil }
         }
     }
 
@@ -52,56 +47,28 @@ final class AppModel {
         }
     }
 
-    private var client: ThermostatClient?
-    private var updatesTask: Task<Void, Never>?
     private var commitTask: Task<Void, Never>?
     private var errorTask: Task<Void, Never>?
 
     init() {
         unitPreference = UnitPreference(rawValue: UserDefaults.standard.string(forKey: "units") ?? "") ?? .thermostat
-        pairings = store.all()
-        let saved = UserDefaults.standard.string(forKey: "selectedPairing")
-        selectedID = pairings.first { $0.id == saved }?.id ?? pairings.first?.id
-        connect()
-        NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in await self?.client?.reconnect() }
-        }
+        selectedID = UserDefaults.standard.string(forKey: "selectedThermostat")
+        bridge.start()
     }
 
-    var selectedPairing: Pairing? { pairings.first { $0.id == selectedID } }
+    var thermostats: [Thermostat] { bridge.thermostats }
 
-    // MARK: Connection
+    /// The selected thermostat, falling back to the first one in the Home.
+    var thermostat: Thermostat? {
+        thermostats.first { $0.id == selectedID } ?? thermostats.first
+    }
 
-    private func connect() {
-        updatesTask?.cancel()
-        let old = client
-        Task { await old?.stop() }
-        client = nil
-        state = nil
-        draftC = nil
-        status = .connecting
-        guard let pairing = selectedPairing else { return }
+    /// Live data is showing and controls can be used.
+    var isLive: Bool { bridge.status == .ready && thermostat?.reachable == true }
 
-        let store = store
-        let client = ThermostatClient(pairing: pairing) { ip, port in
-            // Remember the latest address for fast reconnects / ecobee-local interop.
-            guard pairing.accessoryIP != ip || pairing.accessoryPort != port else { return }
-            var updated = pairing
-            updated.accessoryIP = ip
-            updated.accessoryPort = port
-            try? store.save(updated)
-        }
-        self.client = client
-        updatesTask = Task { [weak self] in
-            await client.start()
-            for await update in client.updates {
-                guard let self, !Task.isCancelled else { return }
-                self.status = update.status
-                if let s = update.state { self.state = s }
-            }
-        }
+    /// Show "Name · Home" in pickers when thermostats span several homes.
+    func label(for t: Thermostat) -> String {
+        Set(thermostats.map(\.home)).count > 1 ? "\(t.name) · \(t.home)" : t.name
     }
 
     // MARK: Units
@@ -110,7 +77,7 @@ final class AppModel {
         switch unitPreference {
         case .fahrenheit: true
         case .celsius: false
-        case .thermostat: state?.prefersFahrenheit ?? (Locale.current.measurementSystem == .us)
+        case .thermostat: thermostat?.prefersFahrenheit ?? (Locale.current.measurementSystem == .us)
         }
     }
 
@@ -131,17 +98,17 @@ final class AppModel {
 
     // MARK: Setpoint
 
-    /// The characteristic the big number and slider control in the current mode.
-    var activeField: ThermostatMap.Field {
-        guard state?.mode == .auto else { return .targetTemperature }
-        return editsCoolThreshold ? .coolThreshold : .heatThreshold
+    /// The setpoint the big number and slider control in the current mode.
+    var activeField: SetpointField {
+        guard thermostat?.mode == .auto else { return .target }
+        return editsCoolThreshold ? .cool : .heat
     }
 
-    var setpointC: Double? { draftC ?? state?.value(activeField)?.double }
+    var setpointC: Double? { draftC ?? thermostat?.value(activeField) }
 
     /// Slider bounds in display units.
     var displayRange: ClosedRange<Double> {
-        let r = state?.range(activeField) ?? TemperatureRange(minC: 10, maxC: 32, stepC: 0.1)
+        let r = thermostat?.range(activeField) ?? TemperatureRange(minC: 10, maxC: 32, stepC: 0.1)
         let lo = (toDisplay(r.minC) / displayStep).rounded(.up) * displayStep
         let hi = (toDisplay(r.maxC) / displayStep).rounded(.down) * displayStep
         return lo...max(hi, lo + displayStep)
@@ -168,10 +135,11 @@ final class AppModel {
     }
 
     private func commitDraft() async {
-        guard let draft = draftC, let client else { return }
-        let field = activeField
+        guard let draft = draftC, let id = thermostat?.id else { return }
         do {
-            try await client.setTemperature(field, celsius: draft)
+            try await bridge.send(.setTemperature(thermostat: id, field: activeField, celsius: draft))
+            // Hold the draft briefly so the number doesn't flick back before the new snapshot arrives.
+            try? await Task.sleep(for: .milliseconds(600))
         } catch {
             flash(error.localizedDescription)
         }
@@ -180,27 +148,28 @@ final class AppModel {
 
     // MARK: Commands
 
-    var isOn: Bool { (state?.mode ?? .off) != .off }
+    var isOn: Bool { (thermostat?.mode ?? .off) != .off }
 
     func togglePower() {
-        if isOn, let mode = state?.mode {
+        guard let t = thermostat else { return }
+        if isOn, let mode = t.mode {
             UserDefaults.standard.set(mode.rawValue, forKey: "lastMode")
             setMode(.off)
         } else {
             let last = HVACMode(rawValue: UserDefaults.standard.integer(forKey: "lastMode")) ?? .heat
-            let available = state?.availableModes ?? []
-            setMode(available.contains(last) && last != .off ? last : available.first { $0 != .off } ?? .heat)
+            setMode(t.availableModes.contains(last) && last != .off ? last : t.availableModes.first { $0 != .off } ?? .heat)
         }
     }
 
-    func setMode(_ mode: HVACMode) { run { try await $0.setMode(mode) } }
-    func setFan(auto: Bool) { run { try await $0.setFan(auto: auto) } }
-    func setComfort(_ comfort: Comfort) { run { try await $0.setComfort(comfort) } }
+    func setMode(_ mode: HVACMode) { send { .setMode(thermostat: $0, mode: mode) } }
+    func setFan(auto: Bool) { send { .setFan(thermostat: $0, auto: auto) } }
+    func setComfort(_ comfort: Comfort) { send { .setComfort(thermostat: $0, comfort: comfort) } }
 
-    private func run(_ body: @escaping @Sendable (ThermostatClient) async throws -> Void) {
-        guard let client else { return }
+    private func send(_ make: (String) -> Command) {
+        guard let id = thermostat?.id else { return }
+        let command = make(id)
         Task {
-            do { try await body(client) } catch { flash(error.localizedDescription) }
+            do { try await bridge.send(command) } catch { flash(error.localizedDescription) }
         }
     }
 
@@ -214,58 +183,15 @@ final class AppModel {
         }
     }
 
-    // MARK: Pairing management
+    // MARK: System
 
-    func pair(_ accessory: DiscoveredAccessory, code: String) async throws {
-        add(try await HAPSession.pair(accessory, code: code))
-    }
-
-    func pair(host: String, port: UInt16, code: String) async throws {
-        add(try await HAPSession.pair(endpoint: .hostPort(host: .init(host), port: .init(rawValue: port)!),
-                                      name: nil, withAuth: false, code: code))
-    }
-
-    func importPairings(from url: URL) throws {
-        let loaded = try Pairing.load(from: url)
-        guard let last = loaded.last else { return }
-        for p in loaded { try store.save(p) }
-        reloadPairings(select: last.id)
-    }
-
-    func importEcobeeLocal() throws {
-        let found = store.importableFromEcobeeLocal()
-        for p in found { try store.save(p) }
-        reloadPairings(select: found.first?.id)
-    }
-
-    var ecobeeLocalImportCount: Int { store.importableFromEcobeeLocal().count }
-
-    private func add(_ pairing: Pairing) {
-        do {
-            try store.save(pairing)
-            reloadPairings(select: pairing.id)
-        } catch {
-            flash(error.localizedDescription)
+    func openHomeApp() {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Home") {
+            NSWorkspace.shared.openApplication(at: url, configuration: .init())
         }
     }
 
-    private func reloadPairings(select id: String?) {
-        pairings = store.all()
-        showingPairing = false
-        if let id, selectedID != id { selectedID = id } else if selectedID == nil { selectedID = pairings.first?.id }
-    }
-
-    /// Unpair from the thermostat (if reachable) and delete local credentials.
-    func remove(_ pairing: Pairing, unpairFromDevice: Bool) async {
-        if unpairFromDevice, pairing.id == selectedID, let client {
-            do { try await client.unpair() } catch { flash("Couldn't unpair from thermostat: \(error.localizedDescription)") }
-        }
-        try? store.delete(pairing)
-        pairings = store.all()
-        if selectedID == pairing.id { selectedID = pairings.first?.id }
-    }
-
-    func reconnect() {
-        Task { await client?.reconnect() }
+    func openHomePrivacySettings() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_HomeKit")!)
     }
 }

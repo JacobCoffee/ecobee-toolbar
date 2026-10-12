@@ -2,6 +2,7 @@
 build/
 .swiftpm/
 *.state
-# HomeKit pairing credentials: long-term keys with full control of the thermostat.
-pair*.json
-pairings/
+# Signing material
+*.provisionprofile
+*.mobileprovision
+*.p12

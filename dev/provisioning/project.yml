@@ -1,0 +1,31 @@
+# Throwaway Mac Catalyst app with the HomeKit capability. Building it with
+# automatic signing makes Xcode create (or renew) the Apple Development
+# certificate and the provisioning profile that scripts/bundle.sh uses to sign
+# the real HomeKit helper. Generated and built by scripts/provision.sh.
+name: ProvisioningStub
+options:
+  createIntermediateGroups: true
+targets:
+  ProvisioningStub:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    supportedDestinations: [macCatalyst]
+    sources: [Stub.swift]
+    entitlements:
+      path: ${STUB_DIR}/ProvisioningStub.entitlements
+      properties:
+        com.apple.developer.homekit: true
+    info:
+      path: ${STUB_DIR}/Info.plist
+      properties:
+        CFBundleDisplayName: EcobeeBar
+        NSHomeKitUsageDescription: EcobeeBar shows and controls the thermostats in your Apple Home.
+        UILaunchScreen: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ${HELPER_ID}
+        DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER: NO
+        DEVELOPMENT_TEAM: ${TEAM_ID}
+        CODE_SIGN_STYLE: Automatic
+        SUPPORTS_MACCATALYST: YES

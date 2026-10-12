@@ -6,6 +6,10 @@ state, ecobee's vendor comfort-profile characteristics, and a remote
 SmartSensor accessory. Current temperature drifts toward the setpoint so
 HVAC activity and event notifications can be observed.
 
+Add it to Apple Home (Home app → Add Accessory → More options, code
+123-45-678) and it shows up in EcobeeBar alongside your real thermostats.
+Remove it from the Home app when you're done.
+
     uv run --with HAP-python dev/fake_thermostat.py [--state PATH] [--port 51826]
 """
 

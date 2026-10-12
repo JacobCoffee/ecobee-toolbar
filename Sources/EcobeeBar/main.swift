@@ -7,15 +7,9 @@ struct PopoverRoot: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        Group {
-            if model.pairings.isEmpty || model.showingPairing {
-                PairingView(model: model)
-            } else {
-                ControlView(model: model)
-            }
-        }
-        .background(Color.black.opacity(0.72))
-        .environment(\.colorScheme, .dark)
+        ControlView(model: model)
+            .background(Color.black.opacity(0.72))
+            .environment(\.colorScheme, .dark)
     }
 }
 
@@ -39,7 +33,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.imagePosition = .imageLeading
         }
         observeStatusItem()
-        if model.pairings.isEmpty { DispatchQueue.main.async { self.togglePopover() } }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        model.bridge.stop()
     }
 
     @objc private func togglePopover() {
@@ -63,22 +60,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateStatusItem() {
         guard let button = statusItem.button else { return }
-        let state = model.state
-        let symbol: String = switch (model.status, state?.activity) {
-        case (.connected, .heating): "flame.fill"
-        case (.connected, .cooling): "snowflake"
-        case (.connected, _): "thermometer.medium"
-        default: "thermometer.medium.slash"
+        let thermostat = model.isLive ? model.thermostat : nil
+        let symbol: String = switch (thermostat?.activity, thermostat != nil) {
+        case (.heating, _): "flame.fill"
+        case (.cooling, _): "snowflake"
+        case (_, true): "thermometer.medium"
+        case (_, false): "thermometer.medium.slash"
         }
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Thermostat")
         image?.isTemplate = true
         button.image = image
-        if model.status == .connected, let c = state?.currentC {
-            button.title = " \(model.format(c))°"
-        } else {
-            button.title = ""
-        }
-        button.toolTip = state.map { "\($0.name): \($0.activity?.title ?? "Idle")" } ?? "EcobeeBar"
+        button.title = thermostat?.currentC.map { " \(model.format($0))°" } ?? ""
+        button.toolTip = thermostat.map { "\($0.name): \($0.activity?.title ?? "Idle")" } ?? "EcobeeBar"
     }
 }
 

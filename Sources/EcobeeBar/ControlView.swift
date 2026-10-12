@@ -1,6 +1,5 @@
 import AppKit
 import EcobeeKit
-import HAPKit
 import SwiftUI
 
 struct ControlView: View {
@@ -9,21 +8,25 @@ struct ControlView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             header
-            VStack(alignment: .leading, spacing: 16) {
-                ThermostatIllustration(
-                    temperature: model.format(model.state?.currentC),
-                    activity: model.state?.activity,
-                    isOn: model.isOn
-                )
-                .frame(maxWidth: .infinity)
-                setpoint
-                if model.state?.mode == .auto { thresholdPicker }
-                sliderRow
-                tiles
-                if let sensors = model.state?.sensors, !sensors.isEmpty { sensorRow(sensors) }
+            if let thermostat = model.thermostat {
+                VStack(alignment: .leading, spacing: 16) {
+                    ThermostatIllustration(
+                        temperature: model.format(thermostat.currentC),
+                        activity: thermostat.activity,
+                        isOn: model.isOn
+                    )
+                    .frame(maxWidth: .infinity)
+                    setpoint(thermostat)
+                    if thermostat.mode == .auto { thresholdPicker(thermostat) }
+                    sliderRow(thermostat)
+                    tiles(thermostat)
+                    if !thermostat.sensors.isEmpty { sensorRow(thermostat.sensors) }
+                }
+                .disabled(!model.isLive)
+                .opacity(model.isLive ? 1 : 0.5)
+            } else {
+                EmptyStateView(model: model)
             }
-            .disabled(model.state == nil)
-            .opacity(model.state == nil ? 0.5 : 1)
             footer
         }
         .padding(20)
@@ -37,49 +40,56 @@ struct ControlView: View {
             Image(systemName: "thermometer.medium")
                 .font(.system(size: 15))
                 .foregroundStyle(Theme.secondary)
-            Menu {
-                Picker("Thermostat", selection: $model.selectedID) {
-                    ForEach(model.pairings) { p in Text(p.displayName).tag(Optional(p.id)) }
-                }
-                .pickerStyle(.inline)
-                Divider()
-                Button("Add Thermostat…") { model.showingPairing = true }
-            } label: {
-                HStack(spacing: 4) {
-                    Text(model.selectedPairing?.displayName ?? model.state?.name ?? "Thermostat")
-                        .lineLimit(1)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
-                }
-                .foregroundStyle(Theme.secondary)
-                .contentShape(Rectangle())
-            }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Switch thermostat")
-            Text("\(model.format(model.state?.currentC))\(model.unitSymbol)")
-                .fontWeight(.semibold)
-            if let h = model.state?.humidity {
-                Text("· \(Int(h))%")
+            if model.thermostats.count > 1 {
+                Menu {
+                    Picker("Thermostat", selection: $model.selectedID) {
+                        ForEach(model.thermostats) { t in Text(model.label(for: t)).tag(Optional(t.id)) }
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(model.thermostat.map(model.label) ?? "Thermostat").lineLimit(1)
+                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold))
+                    }
                     .foregroundStyle(Theme.secondary)
+                    .contentShape(Rectangle())
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Switch thermostat")
+            } else {
+                Text(model.thermostat?.name ?? "EcobeeBar")
+                    .foregroundStyle(Theme.secondary)
+                    .lineLimit(1)
+            }
+            if let t = model.thermostat {
+                Text("\(model.format(t.currentC))\(model.unitSymbol)")
+                    .fontWeight(.semibold)
+                if let h = t.humidity {
+                    Text("· \(Int(h))%").foregroundStyle(Theme.secondary)
+                }
             }
             Spacer()
-            RoundIconButton(symbol: "power", tint: model.isOn ? Theme.tint(for: model.activeField, mode: model.state?.mode) : Theme.secondary,
-                            glow: model.isOn, size: 40) {
-                model.togglePower()
+            if model.thermostat != nil {
+                RoundIconButton(symbol: "power",
+                                tint: model.isOn ? Theme.tint(for: model.activeField, mode: model.thermostat?.mode) : Theme.secondary,
+                                glow: model.isOn, size: 40) {
+                    model.togglePower()
+                }
+                .disabled(!model.isLive)
+                .help(model.isOn ? "Turn off" : "Turn on")
             }
-            .help(model.isOn ? "Turn off" : "Turn on")
         }
         .font(.system(size: 15))
     }
 
-    private var setpoint: some View {
+    private func setpoint(_ t: Thermostat) -> some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 0) {
                 if model.isOn {
-                    if model.state?.mode == .auto {
+                    if t.mode == .auto {
                         Text(model.editsCoolThreshold ? "Cool to" : "Heat to")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(Theme.secondary)
@@ -101,15 +111,15 @@ struct ControlView: View {
                 }
             }
             Spacer()
-            statusPill
+            statusPill(t)
         }
     }
 
-    /// Away toggle on models with comfort profiles, otherwise live HVAC status.
-    @ViewBuilder private var statusPill: some View {
-        if let state = model.state, state.supportsComfort {
+    /// Away toggle on models with working comfort profiles, otherwise live HVAC activity.
+    @ViewBuilder private func statusPill(_ t: Thermostat) -> some View {
+        if t.supportsComfort {
             Toggle(isOn: Binding(
-                get: { state.comfort == .away },
+                get: { t.comfort == .away },
                 set: { model.setComfort($0 ? .away : .home) }
             )) {
                 Label("Away", systemImage: "leaf")
@@ -121,27 +131,25 @@ struct ControlView: View {
             .padding(.vertical, 12)
             .card(radius: 14)
         } else {
-            let activity = model.state?.activity
-            Label(activity?.title ?? "--", systemImage: activity?.symbol ?? "pause.circle")
+            Label(t.activity?.title ?? "--", systemImage: t.activity?.symbol ?? "pause.circle")
                 .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(Theme.tint(for: activity))
+                .foregroundStyle(Theme.tint(for: t.activity))
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
                 .card(radius: 14)
         }
     }
 
-    private var thresholdPicker: some View {
+    private func thresholdPicker(_ t: Thermostat) -> some View {
         HStack(spacing: 8) {
-            thresholdChip(cool: false)
-            thresholdChip(cool: true)
+            thresholdChip(cool: false, value: t.heatThresholdC)
+            thresholdChip(cool: true, value: t.coolThresholdC)
         }
     }
 
-    private func thresholdChip(cool: Bool) -> some View {
+    private func thresholdChip(cool: Bool, value: Double?) -> some View {
         let selected = model.editsCoolThreshold == cool
         let tint = cool ? Theme.cool : Theme.heat
-        let value = cool ? model.state?.coolThresholdC : model.state?.heatThresholdC
         return Button {
             model.editsCoolThreshold = cool
         } label: {
@@ -159,9 +167,9 @@ struct ControlView: View {
         .buttonStyle(.plain)
     }
 
-    private var sliderRow: some View {
+    private func sliderRow(_ t: Thermostat) -> some View {
         let range = model.displayRange
-        let tint = Theme.tint(for: model.activeField, mode: model.state?.mode)
+        let tint = Theme.tint(for: model.activeField, mode: t.mode)
         return VStack(spacing: 8) {
             HStack(spacing: 12) {
                 RoundIconButton(symbol: "minus") { model.nudge(-1) }
@@ -187,30 +195,28 @@ struct ControlView: View {
         }
     }
 
-    private var tiles: some View {
-        let state = model.state
-        return HStack(spacing: 10) {
-            Tile(symbol: state?.mode?.symbol ?? "power", label: "Mode", value: state?.mode?.title ?? "--",
-                 tint: Theme.tint(for: .targetTemperature, mode: state?.mode)) {
-                ForEach(state?.availableModes ?? HVACMode.allCases) { mode in
+    private func tiles(_ t: Thermostat) -> some View {
+        HStack(spacing: 10) {
+            Tile(symbol: t.mode?.symbol ?? "power", label: "Mode", value: t.mode?.title ?? "--",
+                 tint: Theme.tint(for: .target, mode: t.mode)) {
+                ForEach(t.availableModes) { mode in
                     Button { model.setMode(mode) } label: { Label(mode.title, systemImage: mode.symbol) }
                 }
             }
-            if state?.map.supports(.targetFan) ?? false {
-                Tile(symbol: state?.fanRunning == true ? "fan.fill" : "fan", label: "Fan",
-                     value: state?.fanAuto.map { $0 ? "Auto" : "On" } ?? "--") {
+            if let fanAuto = t.fanAuto {
+                Tile(symbol: t.fanRunning == true ? "fan.fill" : "fan", label: "Fan", value: fanAuto ? "Auto" : "On") {
                     Button("Auto") { model.setFan(auto: true) }
                     Button("Always On") { model.setFan(auto: false) }
                 }
             }
-            if let state, state.supportsComfort {
-                Tile(symbol: state.comfort?.symbol ?? "house", label: "Comfort", value: state.comfort?.title ?? "--") {
+            if t.supportsComfort {
+                Tile(symbol: t.comfort?.symbol ?? "house", label: "Comfort", value: t.comfort?.title ?? "--") {
                     ForEach(Comfort.allCases) { c in
                         Button { model.setComfort(c) } label: { Label(c.title, systemImage: c.symbol) }
                     }
                 }
             }
-            Tile(symbol: "humidity", label: "Humidity", value: state?.humidity.map { "\(Int($0))%" } ?? "--")
+            Tile(symbol: "humidity", label: "Humidity", value: t.humidity.map { "\(Int($0))%" } ?? "--")
         }
     }
 
@@ -222,8 +228,8 @@ struct ControlView: View {
                         Image(systemName: s.occupied == true ? "person.fill" : "sensor")
                             .foregroundStyle(s.occupied == true ? Theme.cool : Theme.secondary)
                         Text(s.name).foregroundStyle(Theme.secondary)
-                        if let t = s.temperatureC {
-                            Text("\(model.format(t))°").fontWeight(.semibold)
+                        if let temperature = s.temperatureC {
+                            Text("\(model.format(temperature))°").fontWeight(.semibold)
                         }
                         if s.batteryLow == true {
                             Image(systemName: "battery.25").foregroundStyle(.yellow)
@@ -244,18 +250,25 @@ struct ControlView: View {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
                 Text(error).lineLimit(1).truncationMode(.tail)
             } else {
-                switch model.status {
-                case .connected:
-                    Image(systemName: "checkmark.shield").foregroundStyle(Theme.secondary)
-                    Text("Connected locally")
-                case .connecting:
+                switch model.bridge.status {
+                case .ready where model.thermostat?.reachable == false:
+                    Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
+                    Text("Not responding")
+                case .ready:
+                    Image(systemName: "house").foregroundStyle(Theme.secondary)
+                    Text(model.thermostat?.room.map { "Apple Home · \($0)" } ?? "Apple Home")
+                case .starting, .loading:
                     ProgressView().controlSize(.mini)
-                    Text("Connecting…")
+                    Text("Connecting to Apple Home…")
+                case .awaitingPermission:
+                    Image(systemName: "hand.raised").foregroundStyle(.orange)
+                    Text("Waiting for Home access")
+                case .notAuthorized, .missingEntitlement, .helperMissing:
+                    Image(systemName: "lock").foregroundStyle(.orange)
+                    Text("HomeKit unavailable")
                 case let .failed(message):
-                    Image(systemName: "wifi.exclamationmark").foregroundStyle(.orange)
-                    Text(message).lineLimit(1).truncationMode(.tail)
-                    Button("Retry") { model.reconnect() }
-                        .buttonStyle(.link)
+                    Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+                    Text(message).lineLimit(1).truncationMode(.tail).help(message)
                 }
             }
             Spacer()
@@ -263,6 +276,70 @@ struct ControlView: View {
         }
         .font(.system(size: 13))
         .foregroundStyle(Theme.secondary)
+    }
+}
+
+/// Shown instead of the controls when there's no thermostat to display.
+struct EmptyStateView: View {
+    let model: AppModel
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: symbol)
+                .font(.system(size: 40, weight: .light))
+                .foregroundStyle(Theme.secondary)
+            Text(title).font(.system(size: 17, weight: .semibold))
+            Text(message)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            if let (label, action) = button {
+                Button(label, action: action).controlSize(.large)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 40)
+    }
+
+    private var symbol: String {
+        switch model.bridge.status {
+        case .starting, .loading: "house"
+        case .ready: "thermometer.medium.slash"
+        default: "lock"
+        }
+    }
+
+    private var title: String {
+        switch model.bridge.status {
+        case .starting, .loading: "Connecting to Apple Home…"
+        case .ready: "No Thermostats"
+        case .awaitingPermission: "Allow Home Access"
+        case .notAuthorized: "Home Access Needed"
+        case .missingEntitlement: "HomeKit Signing Required"
+        case .helperMissing: "HomeKit Helper Missing"
+        case .failed: "Can't Reach Apple Home"
+        }
+    }
+
+    private var message: String {
+        switch model.bridge.status {
+        case .starting, .loading: "Loading your homes from HomeKit."
+        case .ready: "Add your ecobee to the Home app on your iPhone or Mac and it will show up here."
+        case .awaitingPermission: "Click Allow in the system prompt so EcobeeBar can read your thermostats from Apple Home."
+        case .notAuthorized: "Allow EcobeeBar to access your Home data in System Settings › Privacy & Security › Home."
+        case .missingEntitlement: "The HomeKit helper must be signed with the HomeKit entitlement and a provisioning profile. See “Signing” in the README."
+        case .helperMissing: "Rebuild with scripts/bundle.sh. The app has to run from its .app bundle."
+        case let .failed(message): message
+        }
+    }
+
+    private var button: (String, () -> Void)? {
+        switch model.bridge.status {
+        case .notAuthorized: ("Open Privacy Settings", model.openHomePrivacySettings)
+        case .ready: ("Open Home", model.openHomeApp)
+        default: nil
+        }
     }
 }
 
@@ -274,11 +351,7 @@ struct SettingsMenu: View {
             Picker("Units", selection: $model.unitPreference) {
                 ForEach(UnitPreference.allCases) { Text($0.title).tag($0) }
             }
-            Divider()
-            Button("Add Thermostat…") { model.showingPairing = true }
-            if let pairing = model.selectedPairing {
-                Button("Remove \(pairing.displayName)…") { confirmRemove(pairing) }
-            }
+            Button("Open Home App") { model.openHomeApp() }
             Divider()
             Toggle("Launch at Login", isOn: Binding(get: { model.launchAtLogin }, set: { model.launchAtLogin = $0 }))
             Button("Quit EcobeeBar") { NSApp.terminate(nil) }
@@ -294,21 +367,5 @@ struct SettingsMenu: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
-    }
-
-    private func confirmRemove(_ pairing: Pairing) {
-        let alert = NSAlert()
-        alert.messageText = "Remove \(pairing.displayName)?"
-        alert.informativeText = "Unpairing tells the thermostat to forget EcobeeBar so it can be added to Apple Home or paired again. "
-            + "Remove Only deletes the local credentials and leaves the thermostat paired."
-        alert.addButton(withTitle: "Unpair & Remove")
-        alert.addButton(withTitle: "Remove Only")
-        alert.addButton(withTitle: "Cancel")
-        NSApp.activate()
-        switch alert.runModal() {
-        case .alertFirstButtonReturn: Task { await model.remove(pairing, unpairFromDevice: true) }
-        case .alertSecondButtonReturn: Task { await model.remove(pairing, unpairFromDevice: false) }
-        default: break
-        }
     }
 }
